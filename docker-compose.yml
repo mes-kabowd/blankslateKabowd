@@ -1,0 +1,153 @@
+name: kabowd-local
+
+x-wordpress-env: &wordpress-env
+  WORDPRESS_DB_HOST: db:3306
+  WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-bitnami_wordpress}
+  WORDPRESS_DB_USER: ${WORDPRESS_DB_USER:-wordpress}
+  WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+  WORDPRESS_DEBUG: ${WORDPRESS_DEBUG:-1}
+  WP_CLI_CACHE_DIR: ${WP_CLI_CACHE_DIR:-/tmp/wp-cli-cache}
+  WP_LOCAL_URL: ${WP_LOCAL_URL:-http://kabowd.localhost:8080}
+  WP_LOCAL_HOST: ${WP_LOCAL_HOST:-kabowd.localhost:8080}
+  WP_PROD_HOST: ${WP_PROD_HOST:-kabowd.ca}
+  LOCAL_CHILD_THEME: ${LOCAL_CHILD_THEME:-kb-biz-flick-child}
+  LOCAL_PARENT_THEME: ${LOCAL_PARENT_THEME:-biz-flick}
+  LOCAL_ACTIVATE_CHILD_THEME: ${LOCAL_ACTIVATE_CHILD_THEME:-true}
+  LOCAL_INSTALL_PROD_PLUGINS: ${LOCAL_INSTALL_PROD_PLUGINS:-true}
+  LOCAL_PROD_PLUGINS: ${LOCAL_PROD_PLUGINS:-jetpack the-post-grid ultimate-addons-for-gutenberg smtp-amazon-ses w3-total-cache wordpress-importer}
+  LOCAL_WORDPRESS_VERSION: ${LOCAL_WORDPRESS_VERSION:-6.9.7}
+  LOCAL_WORDPRESS_LOCALE: ${LOCAL_WORDPRESS_LOCALE:-fr_CA}
+  LOCAL_DISABLE_WP_CRON: ${LOCAL_DISABLE_WP_CRON:-true}
+  LOCAL_BLOCK_EXTERNAL_HTTP: ${LOCAL_BLOCK_EXTERNAL_HTTP:-false}
+  LOCAL_SMTP_HOST: ${LOCAL_SMTP_HOST:-mailpit}
+  LOCAL_SMTP_PORT: ${LOCAL_SMTP_PORT:-1025}
+  WORDPRESS_CONFIG_EXTRA: |
+    $$kb_local_url = getenv('WP_LOCAL_URL') ?: 'http://kabowd.localhost:8080';
+    $$kb_local_host = getenv('WP_LOCAL_HOST') ?: ((parse_url($$kb_local_url, PHP_URL_HOST) ?: 'kabowd.localhost') . ((parse_url($$kb_local_url, PHP_URL_PORT)) ? ':' . parse_url($$kb_local_url, PHP_URL_PORT) : ''));
+
+    define('WP_HOME', $$kb_local_url);
+    define('WP_SITEURL', $$kb_local_url);
+    define('WP_ENVIRONMENT_TYPE', 'local');
+    define('WP_DEBUG_LOG', true);
+    define('WP_DEBUG_DISPLAY', false);
+    define('SCRIPT_DEBUG', true);
+    define('CONCATENATE_SCRIPTS', false);
+    define('WP_AUTO_UPDATE_CORE', false);
+    define('AUTOMATIC_UPDATER_DISABLED', true);
+    define('DISALLOW_FILE_EDIT', false);
+    define('DISALLOW_FILE_MODS', false);
+    define('WP_MEMORY_LIMIT', '256M');
+    define('JETPACK_DEV_DEBUG', true);
+    define('DISABLE_WP_CRON', filter_var(getenv('LOCAL_DISABLE_WP_CRON') ?: 'true', FILTER_VALIDATE_BOOLEAN));
+
+    define('WP_ALLOW_MULTISITE', true);
+    define('MULTISITE', true);
+    define('SUBDOMAIN_INSTALL', true);
+    define('DOMAIN_CURRENT_SITE', $$kb_local_host);
+    define('PATH_CURRENT_SITE', '/');
+    define('SITE_ID_CURRENT_SITE', 1);
+    define('BLOG_ID_CURRENT_SITE', 1);
+    define('COOKIE_DOMAIN', false);
+
+services:
+  db:
+    image: ${MARIADB_IMAGE:-mariadb:11.4.5}
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-root}
+      MARIADB_DATABASE: ${WORDPRESS_DB_NAME:-bitnami_wordpress}
+      MARIADB_USER: ${WORDPRESS_DB_USER:-wordpress}
+      MARIADB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ${LOCAL_BACKUP_DIR:-/Users/admin/kabowd-local/backups}/${DB_BACKUP_FILE:-kabowd-prod-20260905.sql}:/docker-entrypoint-initdb.d/10-prod.sql:ro
+    ports:
+      - "127.0.0.1:${DB_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h 127.0.0.1 -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  restore-uploads:
+    image: ${RESTORE_IMAGE:-alpine:3.22}
+    restart: "no"
+    volumes:
+      - wp_uploads:/uploads
+      - ${LOCAL_BACKUP_DIR:-/Users/admin/kabowd-local/backups}/${UPLOADS_BACKUP_FILE:-kabowd-uploads-20260905.tar.gz}:/backups/uploads.tar.gz:ro
+    command: >
+      sh -c '
+        set -eu
+        marker="/uploads/.restored-from-kabowd-prod"
+        if [ ! -f "$$marker" ]; then
+          tar -xzf /backups/uploads.tar.gz -C /uploads --strip-components=1
+          chown -R 33:33 /uploads
+          touch "$$marker"
+        fi
+      '
+
+  wordpress:
+    image: ${WORDPRESS_IMAGE:-wordpress:6.9-php8.3-apache}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      restore-uploads:
+        condition: service_completed_successfully
+    environment:
+      <<: *wordpress-env
+    volumes:
+      - wp_core:/var/www/html
+      - wp_themes:/var/www/html/wp-content/themes
+      - wp_plugins:/var/www/html/wp-content/plugins
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - ./:/var/www/html/wp-content/themes/kb-biz-flick-child
+      - ./docker/wordpress/mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+      - ./docker/wordpress/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
+    ports:
+      - "127.0.0.1:${WORDPRESS_PORT:-8080}:80"
+
+  wpcli:
+    image: ${WORDPRESS_CLI_IMAGE:-wordpress:cli-php8.3}
+    user: "33:33"
+    depends_on:
+      db:
+        condition: service_healthy
+      wordpress:
+        condition: service_started
+    environment:
+      <<: *wordpress-env
+    volumes:
+      - wp_core:/var/www/html
+      - wp_themes:/var/www/html/wp-content/themes
+      - wp_plugins:/var/www/html/wp-content/plugins
+      - wp_uploads:/var/www/html/wp-content/uploads
+      - ./:/var/www/html/wp-content/themes/kb-biz-flick-child
+      - ./docker/wordpress/mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+      - ./docker/wordpress/bootstrap.sh:/usr/local/bin/kabowd-local-bootstrap:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/kabowd-local-bootstrap"]
+    profiles:
+      - tools
+
+  adminer:
+    image: ${ADMINER_IMAGE:-adminer:5}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${ADMINER_PORT:-8081}:8080"
+
+  mailpit:
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_PORT:-8025}:8025"
+
+volumes:
+  db_data:
+  wp_core:
+  wp_themes:
+  wp_plugins:
+  wp_uploads:
